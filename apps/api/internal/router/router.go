@@ -28,6 +28,11 @@ func New(h *handler.Handler) http.Handler {
 	r.Get("/health", h.Health)
 	r.Get("/readyz", h.Readyz)
 
+	// Version (public, not rate-limited, no DB access). Mounted at /api/version
+	// rather than under /api/v1 so it stays reachable without a versioned client
+	// and without the v1 scope/role middleware.
+	r.Get("/api/version", h.Version)
+
 	// API v1
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(middleware.ContentTypeJSON)
