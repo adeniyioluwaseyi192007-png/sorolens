@@ -24,6 +24,7 @@ type APIStore interface {
 	store.UserStore
 	store.PerformanceStore
 	store.GroupStore
+	store.FailedEventStore
 	store.GlobalEventStore
 	store.LabelStore
 }

@@ -26,11 +26,14 @@ type MockStore struct {
 	alertSubscriptions []AlertSubscription
 	users              map[string]User
 	healthScores       map[string]ContractHealthScore
+	failedEvents       map[int64]FailedEvent
+	failedEventSeq     int64
 	indexerCursors     map[string]uint32
 	groups             map[string]Group
 	groupContracts     map[string]map[string]bool
 	contractVersions   map[string][]ContractVersion
 	alertGroups        []AlertGroup
+	labels             []Label
 
 	// Error injection
 	UpsertContractErr           error
@@ -52,6 +55,10 @@ type MockStore struct {
 	RecordContractVersionErr    error
 	ListContractVersionsErr     error
 	GetLatestContractVersionErr error
+	InsertFailedEventErr error
+	ListFailedEventsErr  error
+	GetFailedEventErr    error
+	DeleteFailedEventErr error
 }
 
 func (m *MockStore) UpsertLabel(_ context.Context, label Label) error {
