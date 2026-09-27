@@ -9,12 +9,19 @@
 // Optional with defaults: SOROBAN_RPC_URL (testnet), STELLAR_NETWORK (testnet),
 // PORT (8080), LOG_LEVEL (info), INDEXER_POLL_INTERVAL (5m),
 // INDEXER_LEDGER_WINDOW (120960 ledgers ≈ 7 days), INDEXER_MAX_DURATION (270s),
+// VERIFY_BUILD_COMMAND (stellar contract build), VERIFY_TIMEOUT (10m),
+// VERIFY_WORKSPACE_DIR (OS temp directory).
+// SENTRY_ENVIRONMENT (production), REQUEST_MAX_BODY_BYTES (1048576 bytes = 1 MiB).
 // COLD_STORAGE_THRESHOLD_DAYS (90), COLD_STORAGE_REGION (us-east-1).
 // COLD_STORAGE_BUCKET is optional: leaving it empty disables the cold tier.
 // SENTRY_ENVIRONMENT (production), REQUEST_MAX_BODY_BYTES (1048576 bytes = 1 MiB),
 // API_CACHE_TTL (30s), API_REQUEST_TIMEOUT (30s), API_STREAM_TIMEOUT (5m).
 // Optional with no default: SENTRY_DSN. Error reporting is disabled entirely
 // when it is unset.
+//
+// METRICS_PORT is optional with no default: when set, GET /metrics is also
+// served on that port (a dedicated admin listener); when empty the endpoint is
+// only available on PORT.
 //
 // Load collects every missing required variable into a single error message
 // so the process fails fast with actionable output.
@@ -48,12 +55,25 @@ type Config struct {
 	Port string
 	// LogLevel controls log verbosity: debug, info, warn, or error.
 	LogLevel string
+	// MetricsPort, when non-empty, starts a second HTTP listener that serves
+	// only GET /metrics. It lets operators scrape metrics on a private
+	// interface instead of exposing the endpoint on the public API port.
+	MetricsPort string
 	// IndexerPollInterval is how often the indexer polls for new events.
 	IndexerPollInterval time.Duration
 	// IndexerLedgerWindow is the number of past ledgers included in a backfill.
 	IndexerLedgerWindow int
 	// IndexerMaxDuration is the wall-clock budget for a single indexer run.
 	IndexerMaxDuration time.Duration
+	// VerifyBuildCommand is the deterministic build invocation used for
+	// contract source verification (issue #263), parsed from a space-separated
+	// string. It is executed directly, never through a shell.
+	VerifyBuildCommand []string
+	// VerifyTimeout bounds a single verification build.
+	VerifyTimeout time.Duration
+	// VerifyWorkspaceDir is the parent directory for verification workspaces.
+	// Empty means the OS temporary directory.
+	VerifyWorkspaceDir string
 	// ColdStorageBucket is the S3-compatible bucket holding archived events.
 	// Empty disables the cold-storage tier entirely: the archive job refuses
 	// to run and the API never falls back to object storage.
@@ -106,6 +126,7 @@ func Load() (*Config, error) {
 		StellarNetwork:       getEnvDefault("STELLAR_NETWORK", "testnet"),
 		Port:                 getEnvDefault("PORT", "8080"),
 		LogLevel:             getEnvDefault("LOG_LEVEL", "info"),
+		MetricsPort:          os.Getenv("METRICS_PORT"),
 		InitialAdminGitHubID: os.Getenv("INITIAL_ADMIN_GITHUB_ID"),
 		SentryDSN:            os.Getenv("SENTRY_DSN"),
 		SentryEnvironment:    getEnvDefault("SENTRY_ENVIRONMENT", "production"),
@@ -132,6 +153,20 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("INDEXER_MAX_DURATION: invalid duration %q: %w", maxDurStr, err)
 	}
 	cfg.IndexerMaxDuration = maxDur
+
+	cfg.VerifyBuildCommand = strings.Fields(getEnvDefault("VERIFY_BUILD_COMMAND", "stellar contract build"))
+	if len(cfg.VerifyBuildCommand) == 0 {
+		return nil, fmt.Errorf("VERIFY_BUILD_COMMAND: must contain at least one argument")
+	}
+
+	verifyTimeoutStr := getEnvDefault("VERIFY_TIMEOUT", "10m")
+	verifyTimeout, err := time.ParseDuration(verifyTimeoutStr)
+	if err != nil {
+		return nil, fmt.Errorf("VERIFY_TIMEOUT: invalid duration %q: %w", verifyTimeoutStr, err)
+	}
+	cfg.VerifyTimeout = verifyTimeout
+
+	cfg.VerifyWorkspaceDir = os.Getenv("VERIFY_WORKSPACE_DIR")
 
 	// Cold storage (issue #146). Optional: an empty bucket disables the tier.
 	cfg.ColdStorageBucket = os.Getenv("COLD_STORAGE_BUCKET")

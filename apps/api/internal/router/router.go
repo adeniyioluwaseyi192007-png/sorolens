@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sorolens/sorolens/apps/api/internal/handler"
+	"github.com/sorolens/sorolens/apps/api/internal/metrics"
 	"github.com/sorolens/sorolens/apps/api/internal/middleware"
 )
 
@@ -31,11 +32,18 @@ func New(h *handler.Handler, maxBodyBytes int64) http.Handler {
 	r.Use(middleware.BodyLimit(maxBodyBytes))
 	r.Use(middleware.Logger(h.Logger))
 	r.Use(chiMiddleware.StripSlashes)
+	r.Use(middleware.Metrics)
 
 	// Emit ETags on cacheable GET/HEAD responses and answer If-None-Match
 	// matches with an empty 304, short-circuiting the body before it
 	// crosses the wire (issue #152).
 	r.Use(middleware.ETag)
+
+	// Compress responses (gzip/br) for clients that ask for it. Must run
+	// before the rate limiter so compressed and uncompressed variants of a
+	// route share one rate-limit bucket (responses are buffered until the
+	// compression decision, so limiter headers written later are unaffected).
+	r.Use(middleware.Compression)
 
 	r.Use(middleware.RateLimit(h.RedisClient, h.Store))
 
@@ -48,11 +56,16 @@ func New(h *handler.Handler, maxBodyBytes int64) http.Handler {
 	// and without the v1 scope/role middleware.
 	r.Get("/api/version", h.Version)
 
-	// Prometheus metrics (issue #143: response cache hit/miss counters). A
-	// registry per router keeps tests that build many routers independent.
+	// Prometheus metrics. It sits outside /api/v1 so it needs no API key, and
+	// the rate limiter skips it explicitly (see middleware.RateLimit) so a
+	// scrape is never throttled. A registry per router keeps tests that build
+	// many routers independent; it carries the request collectors from the
+	// metrics package (updated by middleware.Metrics), the response-cache
+	// counters (issue #143), and the default Go and process collectors.
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	reg.MustRegister(middleware.CacheCollectors()...)
+	reg.MustRegister(metrics.HTTPRequestsInFlight, metrics.HTTPRequestsTotal, metrics.HTTPRequestDuration)
 	r.Get("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}).ServeHTTP)
 	pprofAdmin := middleware.RequireRoleOrForbidden(h.Store, h.Logger, middleware.RoleAdmin)
 	r.With(pprofAdmin).Get("/debug/pprof", pprof.Index)
@@ -150,6 +163,10 @@ func New(h *handler.Handler, maxBodyBytes int64) http.Handler {
 		// unambiguous against /contracts/{id}; it never writes.
 		r.With(scope).Post("/contracts/validate", h.ValidateContract)
 		r.With(scope, contributor, purgeContracts).Post("/contracts", h.RegisterContract)
+		// Bulk untrack/tag over a selection (#176). Like registration it mutates
+		// shared state, so it needs the same contributor role, and it purges both
+		// caches since it can untrack contracts and retag them.
+		r.With(scope, contributor, purgeContracts, purgeLabels).Post("/contracts/batch", h.BatchContracts)
 		r.With(scope, contributor, purgeLabels).Post("/labels", h.CreateLabel)
 		r.With(scope, cacheLabels).Get("/labels", h.ListLabels)
 		r.With(scope, cacheLabels).Get("/resolve", h.ResolveLabel)
@@ -170,6 +187,20 @@ func New(h *handler.Handler, maxBodyBytes int64) http.Handler {
 		get("/contracts/{id}/summary", h.ContractSummary)
 		get("/contracts/{id}/stream", h.StreamEvents)
 		get("/contracts/{id}/graph", h.ContractGraph)
+
+		// Source verification (issue #263). Submitting source mutates the
+		// verification record, so it requires at least contributor role;
+		// reading the cached verdict stays open.
+		r.With(scope, contributor).Post("/contracts/{id}/verify", h.VerifyContract)
+		get("/contracts/{id}/verification", h.GetContractVerification)
+		get("/contracts/{id}/wasm", h.GetContractWasm)
+		get("/contracts/{id}/spec", h.GetContractSpec)
+
+		// User-defined contract tags (issue #459). Wrapped by the contributor
+		// role so an anonymous caller cannot label a contract even though the
+		// write scope passes on the public surface.
+		r.With(scope, contributor).Post("/contracts/{id}/tags", h.AddContractTag)
+		r.With(scope, contributor).Delete("/contracts/{id}/tags/{tag}", h.RemoveContractTag)
 		// Dead-letter queue for events that failed processing (issue #202).
 		get("/dlq", h.ListFailedEvents)
 		r.With(scope, contributor).Post("/dlq/{id}/requeue", h.RequeueFailedEvent)
